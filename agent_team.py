@@ -14,6 +14,53 @@ import requests
 import time
 from safety_config import is_path_safe, is_command_safe, AUTO_BACKUP_BEFORE_BUILD
 from agent_gitops import AgentGitOps
+import psycopg2
+
+# Database integration
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://agent_user:Agent_Password_123@51.159.25.151:16563/agent_db?sslmode=require")
+
+class AgentDatabase:
+    """Database integration for agent system"""
+    
+    def __init__(self):
+        try:
+            self.conn = psycopg2.connect(DATABASE_URL)
+            self.enabled = True
+        except Exception as e:
+            print(f"⚠️ Database not available: {e}")
+            self.enabled = False
+    
+    def log_decision(self, agent_name, decision, reasoning, outcome=None):
+        """Log an agent decision"""
+        if not self.enabled:
+            return
+        try:
+            cur = self.conn.cursor()
+            cur.execute("""
+                INSERT INTO agent_decisions (agent_name, decision, reasoning, outcome)
+                VALUES (%s, %s, %s, %s)
+            """, (agent_name, decision, reasoning, outcome))
+            self.conn.commit()
+        except Exception as e:
+            print(f"⚠️ Failed to log decision: {e}")
+    
+    def save_project(self, project_name, created_by, description=None, metadata=None):
+        """Save project metadata"""
+        if not self.enabled:
+            return
+        try:
+            cur = self.conn.cursor()
+            cur.execute("""
+                INSERT INTO agent_projects (project_name, created_by, description, metadata)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (project_name) DO UPDATE SET
+                    description = EXCLUDED.description,
+                    metadata = EXCLUDED.metadata,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (project_name, created_by, description, json.dumps(metadata or {})))
+            self.conn.commit()
+        except Exception as e:
+            print(f"⚠️ Failed to save project: {e}")
 
 # OpenRouter API configuration (ZDR enabled on your account)
 OPENROUTER_API_KEY = "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"
@@ -328,9 +375,15 @@ Ensure high code coverage and edge case handling.""",
     
     def build_project(self, user_request: str):
         """Main orchestration - builds entire project from description"""
+        # Initialize database
+        db = AgentDatabase()
+        
         print("🤖 AGENT TEAM ACTIVATED")
         print("=" * 60)
         print(f"📝 Request: {user_request}\n")
+        
+        # Log project start
+        db.log_decision("system", "project_start", f"Starting project: {user_request}")
         
         # Step 1: Architect plans
         print("🏗️  ARCHITECT AGENT: Planning project...")
@@ -353,10 +406,23 @@ Output as structured text that the coder can follow.
         print(plan)
         print()
         
+        # Log architect decision
+        db.log_decision("architect", "project_planning", f"Created plan for: {user_request}", "success")
+        
         # Extract project name from plan (simple heuristic)
         project_name = user_request.split()[0].lower().replace(" ", "-")
         project_path = self.workspace / project_name
-        project_path.mkdir(exist_ok=True)
+        
+        # Create project directory
+        project_path.mkdir(parents=True, exist_ok=True)
+        
+        # Save project metadata to database
+        db.save_project(
+            project_name,
+            "agent_team",
+            user_request,
+            {"workspace": str(self.workspace)}
+        )
         
         print(f"📁 Created project directory: {project_path}")
         
@@ -387,6 +453,9 @@ Start with the main files, then supporting files.
         print(code_result)
         print()
         
+        # Log coder completion
+        db.log_decision("coder", "implementation", f"Implemented code for: {project_name}", "success")
+        
         # Step 3: Tester creates tests
         print("🧪 TESTER AGENT: Writing tests...")
         print("-" * 60)
@@ -406,6 +475,9 @@ Use appropriate testing framework for the tech stack.
         test_result = self.tester(tester_prompt)
         print(test_result)
         print()
+        
+        # Log tester completion
+        db.log_decision("tester", "testing", f"Created tests for: {project_name}", "success")
         
         # Step 4: DevOps sets up deployment
         print("🚀 DEVOPS AGENT: Setting up deployment...")
@@ -431,6 +503,12 @@ Make it easy for anyone to run this project.
         deploy_result = self.devops(devops_prompt)
         print(deploy_result)
         print()
+        
+        # Log devops completion
+        db.log_decision("devops", "deployment", f"Set up deployment for: {project_name}", "success")
+        
+        # Log project completion
+        db.log_decision("system", "project_complete", f"Project {project_name} completed successfully", "success")
         
         # Final summary
         print("=" * 60)
